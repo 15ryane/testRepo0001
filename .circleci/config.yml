@@ -1,0 +1,143 @@
+version: 2.1
+jobs:
+  working_directory: ~/repo
+  unit-tests:
+    docker:
+      - image: 'circleci/node:12.13.0-buster'
+    steps:
+      - checkout
+      - restore_cache:
+          keys:
+            - dependencies-cache-{{ checksum "package.json" }}
+            # fallback to using the latest cache if no exact match is found
+            - dependencies-cache
+      - run:
+          name: Login to private GitHub registry
+          command: |
+            echo -e "@spruceapp:registry=https://npm.pkg.github.com/\n//npm.pkg.github.com/:_authToken=$GITHUB_TOKEN" >> ~/repo/.npmrc
+      - run:
+          name: 'Install dependencies'
+          command: 'npm install'
+      - run:
+          name: 'Run unit tests'
+          command: 'npm test'
+      - save_cache:
+          key: 'dependencies-cache-{{ checksum "package.json" }}'
+          paths:
+            - node_modules
+  deploy-staging:
+    docker:
+      - image: 'circleci/node:12.13.0-buster'
+    steps:
+      - checkout
+      - restore_cache:
+          keys:
+            - dependencies-cache-{{ checksum "package.json" }}
+            # fallback to using the latest cache if no exact match is found
+            - dependencies-cache
+      - run:
+          name: Login to private GitHub registry
+          command: |
+            echo -e "@spruceapp:registry=https://npm.pkg.github.com/\n//npm.pkg.github.com/:_authToken=$GITHUB_TOKEN" >> ~/repo/.npmrc
+      - run:
+          name: 'Install dependencies'
+          command: 'npm install'
+      - run:
+          name: 'Build bundle'
+          command: 'npm run build:prod'
+      - run:
+          name: 'Install Python'
+          command: "sudo apt install python2.7 python-dev python-pip\n"
+      - run:
+          name: 'Set commit hash'
+          command: 'sudo echo $CIRCLE_SHA1 > .build'
+      - run:
+          name: 'Install awscli'
+          command: "sudo pip install awscli --upgrade\n"
+      - run:
+          name: 'Configure and set AWS deployment profile'
+          command: "mkdir ~/.aws/\necho -e \"[serverless]\\naws_access_key_id=$AWS_ACCESS_KEY_ID\\naws_secret_access_key=$AWS_SECRET_ACCESS_KEY\\n\" > ~/.aws/credentials\n"
+      - run:
+          name: 'Sync new dist and production bucket'
+          command: "aws s3 sync ./dist \"s3://$STAGING_DEPLOY_BUCKET\" --delete\n"
+      - run:
+          name: 'Invalidate CloudFront cache'
+          command: "aws cloudfront create-invalidation --distribution-id \"${STAGING_CLOUDFRONT_DIST_ID}\" --paths '/*'\n"
+      - save_cache:
+          key: 'dependencies-cache-{{ checksum "package.json" }}'
+          paths:
+            - node_modules
+  deploy-prod:
+    docker:
+      - image: 'circleci/node:12.13.0-buster'
+    steps:
+      - checkout
+      - restore_cache:
+          keys:
+            - dependencies-cache-{{ checksum "package.json" }}
+            # fallback to using the latest cache if no exact match is found
+            - dependencies-cache
+      - run:
+          name: Login to private GitHub registry
+          command: |
+            echo -e "@spruceapp:registry=https://npm.pkg.github.com/\n//npm.pkg.github.com/:_authToken=$GITHUB_TOKEN" >> ~/repo/.npmrc
+      - run:
+          name: 'Install dependencies'
+          command: 'npm install'
+      - run:
+          name: 'Build bundle'
+          command: 'npm run build:prod'
+      - run:
+          name: 'Install Python'
+          command: "sudo apt install python2.7 python-dev python-pip\n"
+      - run:
+          name: 'Set commit hash'
+          command: 'sudo echo $CIRCLE_SHA1 > .build'
+      - run:
+          name: 'Install awscli'
+          command: "sudo pip install awscli --upgrade\n"
+      - run:
+          name: 'Configure and set AWS deployment profile'
+          command: "mkdir ~/.aws/\necho -e \"[serverless]\\naws_access_key_id=$AWS_ACCESS_KEY_ID\\naws_secret_access_key=$AWS_SECRET_ACCESS_KEY\\n\" > ~/.aws/credentials\n"
+      - run:
+          name: 'Sync new dist and production bucket'
+          command: "aws s3 sync ./dist \"s3://$PROD_DEPLOY_BUCKET\" --delete\n"
+      - run:
+          name: 'Invalidate CloudFront cache'
+          command: "aws cloudfront create-invalidation --distribution-id \"${PROD_CLOUDFRONT_DIST_ID}\" --paths '/*'\n"
+      - save_cache:
+          key: 'dependencies-cache-{{ checksum "package.json" }}'
+          paths:
+            - node_modules
+workflows:
+  version: 2
+  pull-request:
+    jobs:
+      - unit-tests:
+          context: 'AWS Keys'
+          filters:
+            branches:
+              only:
+                - '/^(?!pull\/).*$/'
+              ignore: 
+                - master
+      - begin-testing:
+          type: approval
+          requires:
+            - unit-tests
+      - deploy-staging:
+          context: 'AWS Keys'
+          requires:
+            - begin-testing
+  prod-deploy:
+    jobs:
+      - unit-tests:
+          context: 'AWS Keys'
+          filters:
+            branches:
+              only:
+                - master
+      - deploy-prod:
+          context: 'AWS Keys'
+          requires:
+            - unit-tests
